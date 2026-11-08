@@ -44,10 +44,24 @@ export const hideFatal = (): void => { document.getElementById(FATAL_ID)?.remove
 export const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 160);
 
 /**
+ * Erreur d'un script étranger (extension, script injecté par le navigateur comme Brave sur iOS, autre origine) :
+ * le navigateur la masque en « Script error. » sans objet d'erreur ni fichier. Rien d'exploitable ni de lié au jeu.
+ */
+export function isForeignError(e: { error?: unknown; message?: string; filename?: string }): boolean {
+  if (e.error instanceof Error) return false;
+  if (!e.filename) return true;
+  try { return new URL(e.filename, location.href).origin !== location.origin; } catch { return true; }
+}
+
+/**
  * Capte les erreurs non gérées (exceptions, promesses rejetées) : jamais d'écran figé en silence. `report` reçoit le
  * message ; l'application décide de l'afficher (notification) sans interrompre la partie.
  */
 export function installGlobalErrorHandlers(report: (message: string) => void): void {
-  window.addEventListener('error', (e) => { console.error(e.error ?? e.message); report(errorMessage(e.error ?? e.message)); });
+  window.addEventListener('error', (e) => {
+    console.error(e.error ?? e.message);
+    if (isForeignError(e)) return;
+    report(errorMessage(e.error ?? e.message));
+  });
   window.addEventListener('unhandledrejection', (e) => { console.error(e.reason); report(errorMessage(e.reason)); });
 }
