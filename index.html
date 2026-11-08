@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#1b2a41" />
+    <meta name="description" content="Jeu d’artillerie 2D au tour par tour : des vers, des explosions, un terrain destructible." />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Vers" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="format-detection" content="telephone=no" />
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" sizes="any" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png" />
+    <title>Vers</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #1b2a41; overscroll-behavior: none; }
+      /* Jeu plein écran sans scroll, zoom ni sélection accidentels (tactile). */
+      html, body { position: fixed; inset: 0; width: 100%; touch-action: none; user-select: none; -webkit-user-select: none;
+        -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+      #rotate { display: none; position: fixed; inset: 0; z-index: 50; background: #0e1a30; color: #fff; align-items: center;
+        justify-content: center; text-align: center; padding: 24px; font: 600 20px system-ui, sans-serif; }
+      @media (orientation: portrait) { body.touch #rotate { display: flex; } }
+      canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none;
+        user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; image-rendering: auto; }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div id="ui"></div>
+    <div id="pwa" aria-live="polite"></div>
+    <div id="rotate" role="alert"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

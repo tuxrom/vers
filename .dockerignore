@@ -1,0 +1,29 @@
+# Dépendances et builds locaux (reconstruits dans l'image)
+node_modules
+dist
+dev-dist
+*.tsbuildinfo
+
+# VCS / éditeur / outils
+.git
+.gitignore
+.vscode
+.idea
+.claude
+*.log
+npm-debug.log*
+
+# Environnement et secrets
+.env
+.env.*
+!.env.example
+
+# Docker lui-même et docs non nécessaires au build
+Dockerfile
+.dockerignore
+docker-compose*.yml
+README.md
+CLAUDE.md
+
+# Sortie du bundle serveur
+server/dist

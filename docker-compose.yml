@@ -1,0 +1,34 @@
+services:
+  vers:
+    build: .
+    image: vers:latest
+    container_name: vers
+    ports:
+      - "${VERS_PORT:-8080}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Serveur de salons (WebSocket) du mode en ligne : joignable seulement via nginx (`/ws` du service `vers`).
+  vers-server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: vers-server:latest
+    container_name: vers-server
+    environment:
+      PORT: "8787"
+      MAX_ROOMS: "${VERS_MAX_ROOMS:-200}"
+    expose:
+      - "8787"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
