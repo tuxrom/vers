@@ -1,4 +1,4 @@
-import { dist } from '@/core/math';
+import { datan2, dist } from '@/core/math';
 import { GAMEPLAY } from '@/config/gameplay';
 import { emit, type GameState } from '@/core/state';
 import { advanceBody } from '@/physics/ballistics';
@@ -32,7 +32,7 @@ export function createProjectile(
 ): Projectile {
   const p: Projectile = {
     id: s.nextId++, kind, owner, x, y, px: x, py: y, vx, vy,
-    angle: Math.atan2(vy, vx), age: 0, fuse, rest: false, arm: kind === 'mine' ? W.mine.armDelay : 0, dead: false,
+    angle: datan2(vy, vx), age: 0, fuse, rest: false, arm: kind === 'mine' ? W.mine.armDelay : 0, dead: false,
   };
   s.projectiles.push(p);
   return p;

@@ -1,4 +1,4 @@
-import { dist } from '@/core/math';
+import { datan2, dist } from '@/core/math';
 import { GAMEPLAY } from '@/config/gameplay';
 import type { ProjectileSpec } from '@/weapons/specs';
 import type { SolidQuery } from '@/terrain/mask';
@@ -91,6 +91,6 @@ export function advanceBody(
   }
 
   if (spec.spin > 0) p.angle += spec.spin * dt * Math.sign(p.vx || 1);
-  else if (!p.rest) p.angle = Math.atan2(p.vy, p.vx);
+  else if (!p.rest) p.angle = datan2(p.vy, p.vx);
   return { k: 'fly' };
 }

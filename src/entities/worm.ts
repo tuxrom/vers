@@ -1,4 +1,4 @@
-import { dist } from '@/core/math';
+import { datan2, dist } from '@/core/math';
 import { GAMEPLAY } from '@/config/gameplay';
 import { wormName } from '@/config/names';
 import { SIM_DT } from '@/config/engine';
@@ -183,7 +183,7 @@ function updateRope(t: SolidQuery, w: Worm, intent: Intent, dt: number): void {
     const vr = w.vx * ux + w.vy * uy;
     if (vr > 0) { w.vx -= vr * ux; w.vy -= vr * uy; }
   }
-  w.angle = Math.max(-1.1, Math.min(1.1, Math.atan2(-(w.x - rope.ax), Math.max(1, w.y - rope.ay))));
+  w.angle = Math.max(-1.1, Math.min(1.1, datan2(-(w.x - rope.ax), Math.max(1, w.y - rope.ay))));
   w.peakY = w.y; // pas de dégâts de chute pendant le balancement
 }
 
