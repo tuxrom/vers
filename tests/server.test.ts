@@ -71,6 +71,11 @@ describe('serveur WebSocket réel', () => {
     let upd = await a.next('rtt');
     for (let i = 0; i < 10 && upd.rtt !== 87; i++) upd = await a.next('rtt'); // ignore d'éventuelles mesures plus anciennes
     expect(upd).toMatchObject({ id: b.id, rtt: 87 });
+    // Une première mesure très faible (réseau local) est diffusée elle aussi.
+    a.send({ t: 'ping', n: 2, rtt: 3 });
+    let low = await b.next('rtt');
+    while (low.id !== a.id) low = await b.next('rtt'); // Bob reçoit aussi sa propre mesure
+    expect(low.rtt).toBe(3);
     // Départ de Bob en pleine partie : Alice est prévenue, l'équipe de Bob passe à l'IA.
     b.ws.close();
     const rep = await a.next('replace');

@@ -450,7 +450,8 @@ export class RoomManager {
     const p = room?.players.get(id);
     if (room && p && typeof rtt === 'number' && Number.isFinite(rtt)) {
       const next = Math.max(-1, Math.min(9999, Math.round(rtt)));
-      if (Math.abs(p.rtt - next) > 8) {
+      // Première mesure toujours diffusée (sinon une latence < 8 ms ne s'afficherait jamais), puis seulement les écarts nets.
+      if ((p.rtt < 0 && next >= 0) || Math.abs(p.rtt - next) > 8) {
         p.rtt = next;
         this.broadcast(room, { t: 'rtt', id, rtt: next }); // la latence de chacun est affichée à tous (message léger)
       }
