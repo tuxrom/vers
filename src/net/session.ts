@@ -31,6 +31,12 @@ export class OnlineSession {
    * flux de l'ancien joueur / de l'ancien hôte, déjà relayé par le serveur. Monte à chaque remplacement ou changement d'hôte.
    */
   private aiFloor = 0;
+  /** Pas courant de la simulation : les intentions reçues pour un pas déjà joué sont écartées. */
+  private cursor = 0;
+  /** Journal de ce que cet appareil a annoncé / produit récemment : renvoyé au serveur après une reprise de connexion. */
+  private sums: Extract<ClientMsg, { t: 'sum' }>[] = [];
+  private mine = new Map<number, { from: number; items: WireIntent[] }>();
+  private endMsg: ClientMsg | null = null;
   desync: { turn: number } | null = null;
 
   constructor(readonly myId: string, owners: Owner[], public hostId: string, readonly code: string) {
@@ -72,6 +78,7 @@ export class OnlineSession {
    * renvoie null si le pas doit attendre. Les intentions locales sont mises en file d'envoi.
    */
   intentFor(s: GameState, local: () => Intent): Intent | null {
+    this.cursor = s.tick;
     if (s.phase !== 'turn' && s.phase !== 'firing') return NEUTRAL_INTENT;
     const src = this.source(s.turn.team, s.tick);
     if (src === 'local' || src === 'ai-local') {
@@ -87,6 +94,12 @@ export class OnlineSession {
 
   private record(turn: number, tick: number, intent: Intent): void {
     const w = encodeIntent(intent);
+    const log = this.mine.get(turn);
+    if (log && log.from + log.items.length === tick) log.items.push(w);
+    else if (!log) {
+      this.mine.set(turn, { from: tick, items: [w] });
+      for (const k of [...this.mine.keys()]) if (k < turn - 3) this.mine.delete(k);
+    }
     const o = this.out;
     if (o && o.turn === turn && o.from + o.items.length === tick && o.items.length < LIMITS.batch) o.items.push(w);
     else { this.flushOut(); this.out = { turn, from: tick, items: [w] }; }
@@ -108,13 +121,39 @@ export class OnlineSession {
   /** À appeler après un pas qui a fait changer le numéro de tour : annonce l'état au début du tour. */
   turnStarted(s: GameState): void {
     this.flushOut();
-    this.ready.push({ t: 'sum', turn: s.turnNumber, team: s.turn.team, tick: s.tick, hash: syncHash(s) });
+    const sum = { t: 'sum' as const, turn: s.turnNumber, team: s.turn.team, tick: s.tick, hash: syncHash(s) };
+    this.sums.push(sum);
+    if (this.sums.length > 4) this.sums.shift();
+    this.ready.push(sum);
   }
 
   /** À appeler une fois quand la partie se termine : empreinte de l'état final. */
   gameEnded(s: GameState): void {
     this.flushOut();
-    this.ready.push({ t: 'end', tick: s.tick, hash: syncHash(s), winner: s.winner });
+    this.endMsg = { t: 'end', tick: s.tick, hash: syncHash(s), winner: s.winner };
+    this.ready.push(this.endMsg);
+  }
+
+  /**
+   * Reprise après une coupure de connexion (le serveur a gardé la place). L'état du salon est remis à jour, puis tout ce
+   * que cet appareil a annoncé ou produit récemment est remis en file d'envoi : le serveur écarte ce qu'il a déjà reçu.
+   * Renvoie les équipes passées à l'ordinateur entre-temps.
+   */
+  resumed(m: Extract<ServerMsg, { t: 'resumed' }>): number[] {
+    const changed: number[] = [];
+    m.owners.forEach((o, i) => { if (o === 'ai' && this.owners[i] !== 'ai') changed.push(i); });
+    this.owners = m.owners.slice();
+    this.hostId = m.hostId;
+    this.aiFloor = Math.max(this.aiFloor, m.aiFloor);
+    this.out = null;
+    this.ready = [...this.sums];
+    for (const [turn, log] of [...this.mine.entries()].sort((a, b) => a[0] - b[0])) {
+      for (let i = 0; i < log.items.length; i += LIMITS.batch) {
+        this.ready.push({ t: 'in', turn, from: log.from + i, items: log.items.slice(i, i + LIMITS.batch) });
+      }
+    }
+    if (this.endMsg) this.ready.push(this.endMsg);
+    return changed;
   }
 
   /** Message du serveur. Renvoie un texte à afficher (remplacement par l'IA, hôte changé…) ou null. */
@@ -122,7 +161,7 @@ export class OnlineSession {
     switch (m.t) {
       case 'in':
         if (m.by === this.myId || !Array.isArray(m.items)) return null;
-        m.items.forEach((w, i) => this.buffer.set(m.from + i, decodeIntent(w)));
+        m.items.forEach((w, i) => { if (m.from + i >= this.cursor) this.buffer.set(m.from + i, decodeIntent(w)); });
         return null;
       case 'turn': this.confirmedTurn = Math.max(this.confirmedTurn, m.turn); return null;
       case 'desync': this.desync = { turn: m.turn }; return { kind: 'desync', turn: m.turn };

@@ -8,7 +8,7 @@ import { Rng } from '@/core/rng';
 import { step } from '@/core/simulation';
 import { createState, syncHash, type GameState } from '@/core/state';
 import { OnlineSession } from '@/net/session';
-import { LIMITS, decodeIntent, encodeIntent, type ClientMsg, type PlayerInfo, type ServerMsg } from '@/net/protocol';
+import { LIMITS, PROTOCOL_VERSION, cleanWire, decodeIntent, encodeIntent, type ClientMsg, type PlayerInfo, type ServerMsg } from '@/net/protocol';
 import { RoomManager, type Conn } from '../server/rooms';
 
 const NAMES = ['A', 'B', 'C', 'D'];
@@ -44,26 +44,38 @@ class TestClient {
   stalls = 0;
   stepsPerFrame = 3;
 
-  constructor(readonly name: string, private net: FakeNet, private server: RoomManager) {
-    const conn: Conn = { id: '', send: (m) => this.net.later(() => { if (this.alive) this.inbox.push(m); }), close: () => {} };
-    // L'identifiant est attribué par le serveur ; on l'enregistre dès le `welcome`.
-    this.conn = conn;
-  }
-  conn: Conn;
+  constructor(readonly name: string, private net: FakeNet, private server: RoomManager) {}
+  /** Connexion courante (null pendant une coupure) ; `id` reste l'identité de joueur d'origine. */
+  conn: Conn | null = null;
+  key = '';
+  resumes = 0;
 
-  connect(id: string): void {
-    (this.conn as { id: string }).id = id;
-    this.id = id;
-    this.server.connect(this.conn);
-    this.toServer({ t: 'hello', v: 1, name: this.name });
+  private open(connId: string): Conn {
+    const conn: Conn = { id: connId, send: (m) => this.net.later(() => { if (this.alive && this.conn === conn) this.inbox.push(m); }), close: () => {} };
+    this.conn = conn;
+    this.server.connect(conn);
+    this.toServer({ t: 'hello', v: PROTOCOL_VERSION, name: this.name });
+    return conn;
   }
+
+  connect(id: string): void { this.id = id; this.open(id); }
 
   toServer(m: ClientMsg): void {
-    const id = this.id;
-    this.net.later(() => { if (this.alive) this.server.message(id, JSON.stringify(m)); });
+    const conn = this.conn;
+    if (!conn) return;
+    this.net.later(() => { if (this.alive && this.conn === conn) this.server.message(conn.id, JSON.stringify(m)); });
   }
 
-  disconnect(): void { this.alive = false; this.server.disconnect(this.id); }
+  disconnect(): void { this.alive = false; if (this.conn) this.server.disconnect(this.conn.id); }
+
+  /** Coupure réseau : le serveur voit la connexion tomber, le client continue de simuler ce qu'il peut. */
+  drop(): void { const c = this.conn; this.conn = null; if (c) this.server.disconnect(c.id); }
+
+  /** Nouvelle connexion + reprise de la place avec l'ancienne clé. */
+  resume(connId: string, key = this.key): void {
+    this.open(connId);
+    this.toServer({ t: 'resume', code: this.room!.code, id: this.id, key, have: this.state!.tick });
+  }
 
   /** Entrée locale : un robot qui n'agit QUE par des intentions (jamais en écrivant dans l'état). */
   private bot(s: GameState): Intent {
@@ -102,11 +114,18 @@ class TestClient {
       if (s.turnNumber !== before) { this.hashes.set(s.turnNumber, syncHash(s)); ses.turnStarted(s); }
       if ((s.phase as string) === 'gameover') ses.gameEnded(s);
     }
-    for (const m of ses.drain()) this.toServer(m);
+    if (this.conn) for (const m of ses.drain()) this.toServer(m); // pendant une coupure, rien ne part (comme `OnlineController.flush`)
   }
 
   private onServer(m: ServerMsg): void {
     switch (m.t) {
+      case 'welcome': this.key = m.key; break;
+      case 'resumed': {
+        this.resumes++;
+        for (const team of this.session!.resumed(m)) { this.state!.teams[team]!.controller = 'ai'; this.state!.teams[team]!.difficulty = 'medium'; this.events.push(`replace:${team}`); }
+        break;
+      }
+      case 'error': this.events.push(`error:${m.code}`); break;
       case 'room': this.room = { phase: m.phase, players: m.players, code: m.code, hostId: m.hostId, options: m.options }; break;
       case 'start': {
         this.state = createState({ options: m.options, withCanvas: false });
@@ -124,10 +143,11 @@ class TestClient {
   }
 }
 
-function setup(n: number, opts: { latency?: number; options?: Partial<GameOptions> } = {}) {
+function setup(n: number, opts: { latency?: number; options?: Partial<GameOptions>; graceMs?: number; idleMs?: number } = {}) {
   const net = new FakeNet(opts.latency ?? 4);
   const rng = new Rng(7);
-  const server = new RoomManager({ random: () => rng.next() });
+  const clock = { ms: 0 };
+  const server = new RoomManager({ random: () => rng.next(), now: () => clock.ms, graceMs: opts.graceMs ?? 0, idleMs: opts.idleMs });
   const clients = Array.from({ length: n }, (_, i) => new TestClient(NAMES[i]!, net, server));
   clients.forEach((c, i) => c.connect(`c${i}`));
   const teams = Math.max(2, n);
@@ -149,7 +169,7 @@ function setup(n: number, opts: { latency?: number; options?: Partial<GameOption
     for (const c of clients.slice(1)) c.toServer({ t: 'join', code });
     run(net.latency * 2 + 2);
   };
-  return { net, server, clients, options, run, lobby };
+  return { net, server, clients, options, run, lobby, clock };
 }
 
 const equalHashes = (clients: TestClient[]): { turns: number; mismatches: number[] } => {
@@ -357,5 +377,126 @@ describe('lockstep : mêmes entrées, mêmes états', () => {
     expect(a.state!.options.seed).not.toBe(seed1);
     expect(a.state!.options.seed).toBe(b.state!.options.seed);
     expect(a.state!.turnNumber).toBeLessThanOrEqual(1); // nouvelle partie
+  }, 180_000);
+});
+
+describe('durcissement du serveur', () => {
+  it('cleanWire : seuls les champs connus et bornés sont rediffusés', () => {
+    expect(cleanWire(0)).toBe(0);
+    expect(cleanWire('x' as never)).toBe(0);
+    const w = cleanWire({ m: 5, a: -1, j: 1, f: 2, w: '<script>', z: 1e9, t: [1, 'a'], evil: 'x'.repeat(5000) } as never);
+    expect(JSON.stringify(w).length).toBeLessThan(40);
+    expect(w).not.toHaveProperty('evil');
+    expect(w).not.toHaveProperty('w');
+    expect(w).not.toHaveProperty('t');
+    expect(cleanWire({ w: 'bazooka', t: [10.5, 20], z: 3 })).toEqual({ w: 'bazooka', t: [10.5, 20], z: 3 });
+    // Une intention normale traverse le filtre sans perte.
+    const it: Intent = { ...NEUTRAL_INTENT, moveX: 1, fireDown: true, selectWeapon: 'grenade', fuse: 4, target: { x: 12, y: 34 } };
+    expect(decodeIntent(cleanWire(encodeIntent(it)))).toEqual(decodeIntent(encodeIntent(it)));
+  });
+
+  it('annonce de tour hors séquence ignorée : impossible de détourner un tour futur ou de vider l’historique', () => {
+    const { clients, run, lobby, net } = setup(2, { latency: 1 });
+    const [a, b] = clients as [TestClient, TestClient];
+    lobby();
+    a.toServer({ t: 'start' });
+    run(60 * 60, () => a.session !== null && a.session.confirmedTurn >= 1 && b.session!.confirmedTurn >= 1);
+    expect(a.session!.confirmedTurn).toBe(1);
+    // B forge un tour lointain attribué à son équipe, puis tente d'y injecter des actions.
+    b.toServer({ t: 'sum', turn: 500, team: 1, tick: 9_000_000, hash: 'x' });
+    b.toServer({ t: 'in', turn: 500, from: 9_000_000, items: [{ f: 1 }] });
+    run(net.latency * 2 + 4);
+    expect(a.desync || b.desync).toBe(false);
+    run(60 * 60 * 3, () => Math.min(a.state!.turnNumber, b.state!.turnNumber) >= 4);
+    expect(a.session!.confirmedTurn).toBeGreaterThanOrEqual(3); // les tours suivants sont toujours confirmés
+    expect(equalHashes([a, b]).mismatches).toEqual([]);
+  }, 120_000);
+
+  it('salon inactif : fermé après le délai, les joueurs sont prévenus', () => {
+    const { clients, run, lobby, server, clock, net } = setup(2, { latency: 1, idleMs: 60_000 });
+    lobby();
+    expect(server.roomCount).toBe(1);
+    clock.ms += 59_000; server.tick();
+    expect(server.roomCount).toBe(1);
+    clock.ms += 2000; server.tick();
+    run(net.latency * 2 + 2);
+    expect(server.roomCount).toBe(0);
+    expect(clients[0]!.events).toContain('error:expired');
+    expect(server.stats()).toMatchObject({ rooms: 0, created: 1, started: 0 });
+  });
+});
+
+describe('reconnexion', () => {
+  it('coupure pendant son propre tour : place gardée, reprise par clé, actions manquées rejouées, aucune divergence', () => {
+    const { clients, run, lobby, net, server, clock } = setup(2, { latency: 3, graceMs: 20_000 });
+    const [a, b] = clients as [TestClient, TestClient];
+    lobby();
+    a.toServer({ t: 'start' });
+    run(60 * 60 * 3, () => b.state?.turn.team === 1 && b.state.phase === 'turn' && b.state.phaseTime > 1 && a.state?.turn.team === 1);
+    const turn = b.state!.turnNumber;
+    b.drop();
+    run(90); // 1,5 s hors ligne : B continue de jouer localement, A attend
+    clock.ms += 5000; server.tick();
+    expect(a.events).not.toContain('replace:1');
+    expect(a.room!.players.find((p) => p.id === b.id)?.away).toBe(true);
+    // Une clé fausse ne permet pas de voler la place.
+    const thief = new TestClient('X', net, server);
+    thief.id = b.id; thief.room = b.room; thief.state = b.state;
+    thief.resume('thief', 'fausse-cle');
+    thief.state = null;
+    run(net.latency * 2 + 2);
+    thief.frame();
+    expect(thief.events).toContain('error:resume');
+    b.resume('c1-bis');
+    run(net.latency * 2 + 4);
+    expect(b.resumes).toBe(1);
+    expect(a.room!.players.find((p) => p.id === b.id)?.away).toBeFalsy();
+    run(60 * 60 * 6, () => Math.min(a.state!.turnNumber, b.state!.turnNumber) >= turn + 4 || a.state!.phase === 'gameover');
+    expect(Math.min(a.state!.turnNumber, b.state!.turnNumber)).toBeGreaterThanOrEqual(turn + 2);
+    expect(equalHashes([a, b]).mismatches).toEqual([]);
+    expect(a.desync || b.desync).toBe(false);
+    expect(a.state!.teams[1]!.controller).toBe('human');
+    expect(a.session!.confirmedTurn).toBeGreaterThanOrEqual(turn + 1);
+  }, 180_000);
+
+  it('coupure pendant le tour d’un autre : les actions relayées entre-temps sont renvoyées à la reprise ; seconde coupure possible', () => {
+    const { clients, run, lobby } = setup(2, { latency: 3, graceMs: 20_000 });
+    const [a, b] = clients as [TestClient, TestClient];
+    lobby();
+    a.toServer({ t: 'start' });
+    run(60 * 60 * 3, () => a.state?.turn.team === 0 && a.state.phase === 'turn' && a.state.phaseTime > 1 && a.session!.confirmedTurn >= 1);
+    const turn = a.state!.turnNumber;
+    b.drop();
+    run(60 * 4); // A joue pendant que B est hors ligne
+    expect(b.state!.tick).toBeLessThan(a.state!.tick);
+    b.resume('c1-bis');
+    run(60 * 60 * 3, () => b.state!.turnNumber >= turn + 1);
+    expect(b.state!.turnNumber).toBeGreaterThanOrEqual(turn + 1);
+    b.drop();
+    run(30);
+    b.resume('c1-ter'); // la clé de la connexion précédente (reprise) fait foi
+    run(60 * 60 * 6, () => Math.min(a.state!.turnNumber, b.state!.turnNumber) >= turn + 4 || a.state!.phase === 'gameover');
+    expect(b.resumes).toBe(2);
+    expect(equalHashes([a, b]).mismatches).toEqual([]);
+    expect(a.desync || b.desync).toBe(false);
+  }, 180_000);
+
+  it('délai de grâce dépassé : l’équipe passe à l’IA ; la reprise tardive est refusée', () => {
+    const { clients, run, lobby, net, server, clock } = setup(2, { latency: 3, graceMs: 20_000 });
+    const [a, b] = clients as [TestClient, TestClient];
+    lobby();
+    a.toServer({ t: 'start' });
+    run(60 * 60 * 3, () => a.state?.turn.team === 1 && a.state.phase === 'turn' && a.state.phaseTime > 1);
+    const turn = a.state!.turnNumber;
+    b.drop();
+    clock.ms += 21_000; server.tick();
+    run(net.latency * 2 + 2);
+    expect(a.events).toContain('replace:1');
+    b.resume('c1-bis');
+    run(net.latency * 2 + 2);
+    expect(b.events).toContain('error:resume');
+    run(60 * 60 * 6, () => a.state!.turnNumber >= turn + 3 || a.state!.phase === 'gameover');
+    expect(a.state!.turnNumber).toBeGreaterThanOrEqual(turn + 2);
+    expect(a.desync).toBe(false);
   }, 180_000);
 });

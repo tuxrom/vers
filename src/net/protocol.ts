@@ -2,7 +2,7 @@ import { NEUTRAL_INTENT, type Intent } from '@/core/intent';
 import type { GameOptions } from '@/core/options';
 
 /** Version du protocole : le serveur refuse les clients incompatibles. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Identifiant de propriétaire d'une équipe : id d'un joueur, ou `ai` (pilotée par l'IA de l'hôte). */
 export type Owner = string;
@@ -15,6 +15,8 @@ export interface PlayerInfo {
   host: boolean;
   /** Latence aller-retour mesurée par le joueur (ms), −1 si inconnue. */
   rtt: number;
+  /** Connexion perdue : le serveur attend son retour (délai de grâce) avant de le remplacer par l'IA. */
+  away?: boolean;
 }
 
 /** Intention compacte sur le réseau : 0 = neutre, sinon seuls les champs non nuls. */
@@ -33,12 +35,18 @@ export type ClientMsg =
   | { t: 'sum'; turn: number; team: number; tick: number; hash: string }
   | { t: 'end'; tick: number; hash: string; winner: number | null }
   | { t: 'ping'; n: number; rtt: number }
+  /** Reprise après une coupure : ancien identifiant + clé secrète reçue dans `welcome`, `have` = pas courant du client. */
+  | { t: 'resume'; code: string; id: string; key: string; have: number }
   | { t: 'leave' };
 
 export type RoomPhase = 'lobby' | 'playing' | 'over';
 
 export type ServerMsg =
-  | { t: 'welcome'; id: string }
+  /** `key` : secret de la connexion, à présenter pour reprendre sa place après une coupure (`resume`). */
+  | { t: 'welcome'; id: string; key: string }
+  /** Reprise acceptée : état courant du salon (les intentions manquées suivent en messages `in`). */
+  | { t: 'resumed'; id: string; hostId: string; owners: Owner[]; aiFloor: number }
+  | { t: 'rtt'; id: string; rtt: number }
   | { t: 'room'; code: string; hostId: string; phase: RoomPhase; players: PlayerInfo[]; options: GameOptions }
   | { t: 'start'; seed: string; options: GameOptions; owners: Owner[]; hostId: string }
   | { t: 'in'; turn: number; from: number; items: WireIntent[]; by: string }
@@ -50,7 +58,7 @@ export type ServerMsg =
   | { t: 'error'; code: string; message: string };
 
 /** Limites partagées client/serveur. */
-export const LIMITS = { batch: 240, nameMax: 16, players: 4, code: 5, payload: 64 * 1024 } as const;
+export const LIMITS = { batch: 240, nameMax: 16, players: 4, code: 5, payload: 16 * 1024 } as const;
 
 const NO_CRATERS: Intent['craters'] = [];
 
@@ -88,4 +96,25 @@ export function decodeIntent(w: unknown): Intent {
     skipTurn: o.s === 1,
     craters: NO_CRATERS,
   };
+}
+
+/**
+ * Nettoie une intention reçue par le SERVEUR avant de la relayer : seuls les champs connus, aux valeurs permises,
+ * sont conservés (jamais de données arbitraires rediffusées aux autres joueurs).
+ */
+export function cleanWire(w: unknown): WireIntent {
+  if (typeof w !== 'object' || w === null) return 0;
+  const o = w as Record<string, unknown>;
+  const out: Exclude<WireIntent, 0> = {};
+  const fin = (v: unknown, max: number): v is number => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= max;
+  if (o.m === 1 || o.m === -1) out.m = o.m;
+  if (o.j === 1) out.j = 1;
+  if (o.b === 1) out.b = 1;
+  if (o.a === 1 || o.a === -1) out.a = o.a;
+  if (o.f === 1) out.f = 1;
+  if (typeof o.w === 'string' && /^[a-zA-Z0-9_-]{1,24}$/.test(o.w)) out.w = o.w;
+  if (fin(o.z, 60)) out.z = o.z;
+  if (Array.isArray(o.t) && fin(o.t[0], 1e6) && fin(o.t[1], 1e6)) out.t = [o.t[0], o.t[1]];
+  if (o.s === 1) out.s = 1;
+  return Object.keys(out).length === 0 ? 0 : out;
 }

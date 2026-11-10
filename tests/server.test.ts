@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, type ClientMsg, type ServerMsg } from '@/net/protocol';
-import { startServer, type RunningServer } from '../server/serve';
+import { clientIp, originAllowed, startServer, type RunningServer } from '../server/serve';
 
 /** Client WebSocket minimal (WebSocket natif de Node 22) avec file de messages typés. */
 class Peer {
@@ -27,7 +27,7 @@ class Peer {
 }
 
 let srv: RunningServer;
-beforeAll(async () => { srv = await startServer({ port: 0, host: '127.0.0.1', heartbeatMs: 60_000 }); });
+beforeAll(async () => { srv = await startServer({ port: 0, host: '127.0.0.1', heartbeatMs: 60_000, graceMs: 0 }); });
 afterAll(async () => { await srv.close(); });
 
 describe('serveur WebSocket réel', () => {
@@ -68,9 +68,9 @@ describe('serveur WebSocket réel', () => {
     // Latence : pong immédiat, puis valeur diffusée à tous.
     b.send({ t: 'ping', n: 1, rtt: 87 });
     expect((await b.next('pong')).n).toBe(1);
-    let upd = await a.next('room');
-    for (let i = 0; i < 10 && upd.players.find((p) => p.id === b.id)!.rtt !== 87; i++) upd = await a.next('room'); // ignore les mises à jour de salon plus anciennes
-    expect(upd.players.find((p) => p.id === b.id)!.rtt).toBe(87);
+    let upd = await a.next('rtt');
+    for (let i = 0; i < 10 && upd.rtt !== 87; i++) upd = await a.next('rtt'); // ignore d'éventuelles mesures plus anciennes
+    expect(upd).toMatchObject({ id: b.id, rtt: 87 });
     // Départ de Bob en pleine partie : Alice est prévenue, l'équipe de Bob passe à l'IA.
     b.ws.close();
     const rep = await a.next('replace');
@@ -98,5 +98,75 @@ describe('serveur WebSocket réel', () => {
     expect(d.turn).toBe(1);
     expect(Object.values(d.hashes).sort()).toEqual(['AAA', 'BBB']);
     a.ws.close(); b.ws.close();
+  });
+});
+
+describe('garde-fous du serveur', () => {
+  it('origine : même hôte par défaut, liste blanche, joker ; client sans en-tête Origin accepté', () => {
+    expect(originAllowed(undefined, 'vers.example', [])).toBe(true);
+    expect(originAllowed('https://vers.example', 'vers.example', [])).toBe(true);
+    expect(originAllowed('http://127.0.0.1:8099', '127.0.0.1:8099', [])).toBe(true);
+    expect(originAllowed('http://127.0.0.1:8099', '127.0.0.1', [])).toBe(true); // port retiré par un proxy
+    expect(originAllowed('https://evil.example', 'vers.example', [])).toBe(false);
+    expect(originAllowed('pas une url', 'vers.example', [])).toBe(false);
+    expect(originAllowed('https://autre.example', 'vers.example', ['https://autre.example'])).toBe(true);
+    expect(originAllowed('https://vers.example', 'vers.example', ['https://autre.example'])).toBe(false);
+    expect(originAllowed('https://evil.example', 'vers.example', ['*'])).toBe(true);
+  });
+
+  it('adresse du client : en-têtes du proxy crus seulement depuis un réseau privé', () => {
+    const req = (remoteAddress: string, headers: Record<string, string>) => ({ socket: { remoteAddress }, headers }) as never;
+    expect(clientIp(req('172.18.0.5', { 'x-real-ip': '203.0.113.9' }))).toBe('203.0.113.9');
+    expect(clientIp(req('127.0.0.1', { 'x-forwarded-for': '203.0.113.7, 10.0.0.1' }))).toBe('203.0.113.7');
+    expect(clientIp(req('198.51.100.4', { 'x-real-ip': '203.0.113.9' }))).toBe('198.51.100.4');
+  });
+
+  it('limite de connexions par adresse, message trop gros refusé, /stats', async () => {
+    const s = await startServer({ port: 0, host: '127.0.0.1', heartbeatMs: 60_000, maxConnPerIp: 2 });
+    try {
+      const url = `ws://127.0.0.1:${s.port}/ws`;
+      const p1 = new Peer(url, 'A'); await p1.open();
+      const p2 = new Peer(url, 'B'); await p2.open();
+      await p1.next('welcome'); await p2.next('welcome');
+      const p3 = new Peer(url, 'C');
+      await expect(p3.open()).rejects.toThrow();
+      // Un message au-delà de la taille maximale ferme la connexion fautive.
+      const closed = new Promise<void>((r) => { p2.ws.onclose = () => r(); });
+      p2.ws.send(JSON.stringify({ t: 'create', options: { pad: 'x'.repeat(40_000) } }));
+      await closed;
+      p1.send({ t: 'create', options: {} as never });
+      await p1.next('room');
+      const stats = await (await fetch(`http://127.0.0.1:${s.port}/stats`)).json() as { rooms: number; created: number };
+      expect(stats).toMatchObject({ rooms: 1, created: 1 });
+      p1.ws.close();
+    } finally { await s.close(); }
+  });
+
+  it('reprise sur un vrai socket : place gardée pendant le délai de grâce', async () => {
+    const s = await startServer({ port: 0, host: '127.0.0.1', heartbeatMs: 60_000, graceMs: 5000 });
+    try {
+      const url = `ws://127.0.0.1:${s.port}/ws`;
+      const a = new Peer(url, 'Alice'); const b = new Peer(url, 'Bob');
+      await a.open(); await b.open();
+      await a.next('welcome'); const wb = await b.next('welcome');
+      a.send({ t: 'create', options: { teams: [{ name: 'A', controller: 'human' }, { name: 'B', controller: 'human' }] } as never });
+      const room = await a.next('room');
+      b.send({ t: 'join', code: room.code });
+      await b.next('room');
+      a.send({ t: 'start' });
+      await a.next('start'); await b.next('start');
+      a.send({ t: 'sum', turn: 1, team: 0, tick: 50, hash: 'h' });
+      b.send({ t: 'sum', turn: 1, team: 0, tick: 50, hash: 'h' });
+      await b.next('turn');
+      b.ws.close();
+      await new Promise((r) => setTimeout(r, 100));
+      a.send({ t: 'in', turn: 1, from: 50, items: [0, { m: 1 }] });
+      const b2 = new Peer(url, 'Bob'); await b2.open(); await b2.next('welcome');
+      b2.send({ t: 'resume', code: room.code, id: wb.id, key: wb.key, have: 50 });
+      expect(await b2.next('resumed')).toMatchObject({ id: wb.id });
+      expect(await b2.next('in')).toMatchObject({ turn: 1, from: 50, items: [0, { m: 1 }] });
+      expect(a.msgs.some((m) => m.t === 'replace')).toBe(false);
+      a.ws.close(); b2.ws.close();
+    } finally { await s.close(); }
   });
 });

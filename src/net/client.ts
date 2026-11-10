@@ -9,8 +9,8 @@ export type NetStatus = 'closed' | 'connecting' | 'open';
 
 /**
  * Connexion WebSocket au serveur de salons : messages typés, mesure de latence (ping toutes les 2 s, moyenne lissée)
- * et signalement de la fermeture. Aucune reconnexion automatique : en lockstep, une coupure sort le joueur de la
- * partie (le serveur le remplace alors par l'IA).
+ * et signalement de la fermeture. La reconnexion après une coupure est pilotée par `OnlineController` (nouvelle
+ * connexion + message `resume`).
  */
 export class NetClient {
   private ws: WebSocket | null = null;
@@ -20,6 +20,8 @@ export class NetClient {
   status: NetStatus = 'closed';
   /** Identifiant attribué par le serveur (message `welcome`). */
   id = '';
+  /** Secret de la connexion (message `welcome`) : sert à reprendre sa place après une coupure. */
+  key = '';
   /** Latence aller-retour lissée (ms), -1 tant qu'inconnue. */
   rtt = -1;
   onMessage: (m: ServerMsg) => void = () => {};
@@ -44,6 +46,7 @@ export class NetClient {
         try { m = JSON.parse(String(ev.data)) as ServerMsg; } catch { return; }
         if (m.t === 'welcome') {
           this.id = m.id;
+          this.key = m.key;
           this.status = 'open';
           this.startPing();
           if (!settled) { settled = true; window.clearTimeout(timer); resolve(); }
@@ -86,6 +89,9 @@ export class NetClient {
   send(m: ClientMsg): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(m));
   }
+
+  /** Coupe la connexion comme le ferait une panne réseau (tests : déclenche la reprise automatique). */
+  drop(): void { this.ws?.close(); }
 
   close(): void {
     window.clearInterval(this.pingTimer);
