@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": { "correctness": "error" },
+  "rules": {
+    "eslint/eqeqeq": ["error", "always", { "null": "ignore" }],
+    "unicorn/no-useless-spread": "off",
+    "eslint/no-var": "error",
+    "eslint/no-eval": "error",
+    "eslint/no-restricted-globals": ["error", "event", "name", "status", "length"],
+    "typescript/no-explicit-any": "error"
+  },
+  "ignorePatterns": ["dist", "dev-dist", "server/dist", "node_modules"]
+}

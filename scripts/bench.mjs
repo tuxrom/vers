@@ -55,7 +55,7 @@ if (THROTTLE > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: THROT
 if (ALLOC) { await cdp.send('HeapProfiler.enable'); await cdp.send('HeapProfiler.startSampling', { samplingInterval: 1024, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true }); }
 if (PROFILE) { await cdp.send('Profiler.enable'); await cdp.send('Profiler.setSamplingInterval', { interval: 200 }); await cdp.send('Profiler.start'); }
 
-const result = await page.evaluate(async ({ seconds, profile }) => {
+const result = await page.evaluate(async ({ seconds }) => {
   const g = window.__game;
   const { state, camera, canvas, perf } = g;
   camera.zoomBy(1.3, canvas.width / 2, canvas.height / 2, canvas.width, canvas.height, true);
@@ -85,7 +85,7 @@ const result = await page.evaluate(async ({ seconds, profile }) => {
   });
   const s = perf.stats();
   return { ...s, allocKBperFrame: allocated / 1024 / Math.max(1, frames), worms: state.worms.length, canvas: [canvas.el.width, canvas.el.height], resolutionScale: canvas.resolutionScale };
-}, { seconds: SECONDS, profile: PROFILE });
+}, { seconds: SECONDS });
 
 let top = null;
 if (PROFILE) {

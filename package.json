@@ -12,14 +12,17 @@
     "test": "vitest run",
     "icons": "pwa-assets-generator",
     "bench": "node scripts/bench.mjs",
-    "server:build": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node22 --alias:@=./src --external:ws --outfile=server/dist/server.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
-    "server": "npm run server:build && node server/dist/server.mjs"
+    "server:build": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node22 --alias:@=./src --external:bufferutil --external:utf-8-validate --outfile=server/dist/server.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\"",
+    "server": "npm run server:build && node server/dist/server.mjs",
+    "test:e2e": "node tests/e2e/online.e2e.mjs",
+    "lint": "oxlint --deny-warnings src server tests scripts"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/ws": "^8.18.2",
     "@vite-pwa/assets-generator": "^2.0.0",
     "esbuild": "^0.28.2",
+    "oxlint": "^1.93.0",
     "playwright-core": "^1.65.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.6",

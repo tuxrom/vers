@@ -9,17 +9,14 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY src ./src
 COPY server ./server
-RUN mkdir /out \
- && npx esbuild server/index.ts --bundle --platform=node --format=esm --target=node22 --alias:@=./src --external:ws --outfile=/out/server.mjs \
- && node -e "const v=require('./package.json').devDependencies.ws; require('fs').writeFileSync('/out/package.json', JSON.stringify({name:'vers-server',private:true,type:'module',dependencies:{ws:v}}))"
+# `ws` est inclus dans le bundle (version figée par package-lock.json) : l'image d'exécution n'installe rien.
+RUN npm run server:build
 
-# --- Étape 2 : exécution minimale (seule dépendance : ws) ---------------------------------------------
+# --- Étape 2 : exécution minimale (un seul fichier, aucune dépendance) --------------------------------
 FROM node:lts-alpine AS runtime
 ENV NODE_ENV=production PORT=8787
 WORKDIR /app
-COPY --from=build /out/package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
-COPY --from=build /out/server.mjs ./
+COPY --from=build /app/server/dist/server.mjs ./
 USER node
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD wget -qO /dev/null http://127.0.0.1:8787/healthz || exit 1
