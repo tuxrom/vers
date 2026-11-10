@@ -122,12 +122,17 @@ Dockerfile  nginx.conf  nginx-security.inc  docker-compose.yml  .dockerignore  .
   `platform/fullscreen.ts` : plein écran + `orientation.lock('landscape')` au lancement d'une partie tactile (repli :
   écran de rotation `#rotate`). La version (`__APP_VERSION__`, = package.json) s'affiche dans Réglages ; **un
   changement de code sans nouvelle empreinte de bundle n'est pas détecté** (le bundle change dès qu'un fichier change).
+- En ligne côté client : tout est dans `net/controller.ts` (`OnlineController` : connexion, salon, pas lockstep `step()`,
+  `flush()`, reprise après coupure `reconnect()`), sans DOM — l'application lui est injectée (`OnlineApp`) ; `main.ts` ne
+  fait que câbler (`beginGame` sert aux parties locales et en ligne). Protocole versionné (`PROTOCOL_VERSION`, à incrémenter
+  à tout changement de message). Coupure : le serveur garde la place `GRACE_MS`, le client renvoie `resume` (id + clé du
+  `welcome`), le serveur rejoue les intentions manquées ; toute intention relayée passe par `cleanWire`.
 - En ligne (`docs/online.md`) : lockstep — seules les intentions circulent, rejouées au même numéro de pas chez tous.
   `net/session.ts` (`OnlineSession.intentFor`) : phase avant le pas ∉ {turn, firing} ⇒ intention NEUTRE chez tous ; sinon
   propriétaire de l'équipe active (local / IA de l'hôte / réseau, le pas attend). Le serveur (`server/rooms.ts`) tire la
   graine, autorise l'émetteur, confirme chaque tour quand toutes les `syncHash` sont égales, détecte la désynchronisation,
   remplace un joueur parti par l'IA de l'hôte (`fromTick`) et promeut un nouvel hôte. **La simulation ne doit utiliser que
-  des opérations exactes** (`core/math.ts` : `dist/dsin/dcos`, `Math.sqrt`…) : pas de `Math.hypot/sin/cos/pow/exp`, pas
+  des opérations exactes** (`core/math.ts` : `dist/dsin/dcos/datan2`, `Math.sqrt`…) : pas de `Math.hypot/sin/cos/atan2/pow/exp`, pas
   d'horloge ni de `Math.random` (garde-fou : `tests/determinism.test.ts`). Toute nouvelle donnée de simulation doit être
   dans `syncHash`. Le serveur ne simule rien. `npm run server` + `tests/online.test.ts` / `server.test.ts`.
 - Performance (`docs/performance.md`, `npm run bench`) : ne pas allouer dans les chemins chauds (pas de
@@ -168,10 +173,15 @@ npm :
 - `npm run preview` — sert `dist/` en local (ajouter `-- --host 127.0.0.1` pour ne pas l'exposer sur le réseau)
 - `npm run icons` — régénère les icônes PWA depuis `public/icon.svg`
 - `npm run typecheck` — vérification de types seule
+- `npm run lint` — oxlint (`.oxlintrc.json` ; typescript-eslint ne prend pas en charge TypeScript 7)
+- `npm run test:e2e` — mode en ligne dans Chromium contre la pile Docker lancée (`-- http://127.0.0.1:<port>`)
 - `npm test` — Vitest (terrain, collisions, physique, armes, menus, IA ; ≈ 1,5 min dont les duels d'IA) ; à lancer avec le build à chaque étape
 
 Docker :
-- `docker compose up --build -d` — build et lancement ; port hôte via `VERS_PORT` (défaut 8080,
+- Production (serveur openspec.fr, `/home/debian/compose/vers`) : `docker compose -f docker-compose.prod.yml up --build -d`
+  (réseau externe `proxy`, conteneurs `vers` / `vers-server`, aucun port publié). **Ne jamais lancer le compose de dev avec
+  ces noms de conteneurs** ; pour un essai local : `docker compose -p verstest …` sur un autre port.
+- `docker compose up --build -d` — build et lancement, port publié sur `127.0.0.1` (`VERS_BIND`) ; port hôte via `VERS_PORT` (défaut 8080,
   ex. `VERS_PORT=8099 docker compose up --build -d`, ou fichier `.env`, cf. `.env.example`)
 - `docker compose logs -f` / `docker compose down`
 - Healthcheck : `GET /healthz` → `ok`
@@ -188,7 +198,9 @@ Le conteneur sert en HTTP sur le port 80 interne. Le proxy (nginx-proxy-manager)
 - activer le support WebSocket (`Upgrade` / `Connection: upgrade`) — requis pour l'étape 11 ;
 - ne **pas** mettre en cache `index.html`, `sw.js`, `manifest.webmanifest` (sinon les mises à jour ne sont jamais vues) (nginx envoie déjà
   `Cache-Control: no-cache`) ; ne pas réécrire les `Cache-Control` des `/assets/*` (immutables) ;
-- ne pas imposer de CSP bloquant les scripts/workers inline de Workbox sans test.
+- ne pas ajouter de CSP côté proxy : nginx interne en envoie déjà une (`nginx-security.inc`, même origine uniquement,
+  `frame-ancestors 'none'`), vérifiée par `npm run test:e2e` (service worker, aucune violation) ;
+- transmettre l'en-tête `Origin` tel quel (le serveur de salons le compare à `Host`).
 Vérifié derrière un reverse proxy nginx HTTPS (en-têtes ci-dessus) : service worker, hors ligne, installabilité
 et en-têtes de cache inchangés. Contrôle d'une mise à jour : changer `version` dans package.json, `docker compose up
 --build -d`, puis la page ouverte affiche le toast (`registration.update()` ou retour au premier plan).

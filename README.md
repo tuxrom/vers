@@ -9,7 +9,7 @@ particules et sons sont générés par le code.
 - **9 armes** : bazooka, grenade, fusil à pompe, dynamite, mine, frappe aérienne, batte, corde ninja, téléportation.
 - **Terrain** procédural (collines, grottes, îlots flottants), entièrement destructible, graine réglable.
 - **Mort subite** : l'eau monte ; caisses de soins / armes / outils larguées en parachute.
-- **Mode en ligne** par salons (code à partager) : lockstep déterministe, états vérifiés à chaque tour, remplacement par l'IA en cas de déconnexion — [docs/online.md](docs/online.md).
+- **Mode en ligne** par salons (code à partager) : lockstep déterministe, états vérifiés à chaque tour, reprise automatique après une coupure réseau, remplacement par l'IA en cas de départ — [docs/online.md](docs/online.md).
 - **Replay au ralenti** du dernier tir (killcam), rendu possible par une simulation 100 % déterministe.
 - **Mobile** : commandes tactiles repositionnables, retour haptique, plein écran paysage, zones sûres (encoches).
 
@@ -30,25 +30,34 @@ npm run dev          # http://localhost:5173, overlay FPS actif (F3 pour le masq
 | `npm run build` | `tsc --noEmit` puis build de production dans `dist/` (+ service worker) |
 | `npm run preview` | Sert `dist/` (ajouter `-- --host 127.0.0.1` pour ne pas l'exposer au réseau) |
 | `npm run typecheck` | Vérification des types seule |
+| `npm run lint` | Analyse statique (oxlint, `.oxlintrc.json`) |
 | `npm test` | Tests Vitest (physique, armes, menus, IA, tactile, PWA, replay…) — environ 1 min 30 |
 | `npm run icons` | Régénère les icônes PWA depuis `public/icon.svg` |
 | `npm run bench` | Banc d'essai de performance (voir [docs/performance.md](docs/performance.md)) |
+| `npm run test:e2e` | Test de bout en bout du mode en ligne dans Chromium, contre la pile Docker lancée (`-- http://127.0.0.1:8080`) |
 | `npm run server` | Serveur de salons du mode en ligne en local (port 8787 ; `npm run dev` proxifie `/ws` vers lui) |
 
 Autres outils : `TUNING=1 npx vitest run tests/tuning.test.ts` joue des parties IA contre IA pour mesurer le ressenti
 ([docs/gameplay-tuning.md](docs/gameplay-tuning.md)). Paramètres d'URL : `?debug` (overlay, accès à `window.__game`),
 `?seed=<texte>` ou `?play` (lancement direct sans menu), `?noadapt` (résolution dynamique coupée).
 
+Intégration continue : `.github/workflows/ci.yml` (types, lint, tests, build, bundle serveur, puis images Docker + test de
+bout en bout). `npm audit` signale des vulnérabilités modérées dans des dépendances **de build** de `vite-plugin-pwa`
+(`workbox-build` → `glob`, `minimatch`, `deepmerge`) : elles ne sont pas livrées (ni dans `dist/`, ni dans l'image du
+serveur) et le seul correctif proposé (`npm audit fix --force`) rétrograde `vite-plugin-pwa` — ne pas l'appliquer.
+
 ### Docker
 
 ```bash
-docker compose up --build -d                       # port 8080 par défaut
+docker compose up --build -d                       # http://127.0.0.1:8080 (boucle locale seulement)
 VERS_PORT=8099 docker compose up --build -d        # ou variable d'environnement / fichier .env (voir .env.example)
+VERS_BIND=0.0.0.0 docker compose up --build -d     # ouvre le port au réseau (sans reverse proxy)
+docker compose -f docker-compose.prod.yml up --build -d   # production : réseau `proxy` de nginx-proxy-manager, aucun port publié
 docker compose logs -f
 docker compose down
 ```
 
-`docker-compose.yml` lance **deux services** : `vers` (nginx + jeu, port `VERS_PORT`) et `vers-server` (serveur de salons WebSocket du mode en ligne, interne, `server/Dockerfile`), joint par nginx sous `/ws`. Le `Dockerfile` du jeu est multi-étapes (`node:lts-alpine` pour `npm ci` + build, `nginx:alpine` pour servir `dist/`).
+`docker-compose.yml` lance **deux services** : `vers` (nginx + jeu, port `VERS_PORT`) et `vers-server` (serveur de salons WebSocket du mode en ligne, interne, `server/Dockerfile`), joint par nginx sous `/ws`. Les conteneurs sont durcis (`read_only`, `cap_drop: ALL`, `no-new-privileges`, limites mémoire) ; l'image du serveur ne contient qu'un fichier (`ws` inclus dans le bundle, version figée par `package-lock.json`). nginx envoie une CSP stricte (`nginx-security.inc` : tout en même origine, `frame-ancestors 'none'`). Le `Dockerfile` du jeu est multi-étapes (`node:lts-alpine` pour `npm ci` + build, `nginx:alpine` pour servir `dist/`).
 `GET /healthz` répond `ok` (utilisé par le *healthcheck* Compose). Le conteneur redémarre automatiquement
 (`restart: unless-stopped`).
 
