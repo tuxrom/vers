@@ -246,7 +246,7 @@ export class MenuManager {
       if (team.controller === 'ai') who = t('online.slot.ai', { level: t(`difficulty.${team.difficulty}` as Key) });
       else if (p) who = `${p.name}${p.host ? ` (${t('online.hostTag')})` : ''}${p.id === room.you ? ` — ${t('online.youTag')}` : ''}`;
       else who = t('online.slot.open');
-      const lat = p && p.rtt >= 0 ? `${p.rtt} ms` : '';
+      const lat = p?.away ? t('online.away') : p && p.rtt >= 0 ? `${p.rtt} ms` : '';
       const dot = h('span', { attrs: { 'aria-hidden': 'true', style: `display:inline-block;width:14px;height:14px;border-radius:50%;background:${team.color};margin-right:10px;flex:none` } });
       return h('div', { class: 'row between', attrs: { style: 'padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.1);flex-wrap:nowrap' } },
         h('div', { attrs: { style: 'display:flex;align-items:center;min-width:0' } }, dot,

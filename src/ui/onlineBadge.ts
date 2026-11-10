@@ -7,13 +7,13 @@ export interface OnlineBadgeInfo {
   code: string;
   /** Dernier tour confirmé synchronisé par le serveur. */
   syncedTurn: number;
-  /** Nom du joueur dont on attend les actions (le lockstep attend), ou null. */
-  waitingFor: string | null;
+  /** Ligne d'alerte déjà traduite (attente d'un joueur, reconnexion), ou null. */
+  status: string | null;
 }
 
 const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
-/** Pastille « en ligne » : latence colorée, code du salon, état de synchronisation, attente d'un joueur. */
+/** Pastille « en ligne » : latence colorée, code du salon, état de synchronisation, attente d'un joueur ou reconnexion. */
 export function drawOnlineBadge(c: GameCanvas, info: OnlineBadgeInfo): void {
   const { ctx } = c;
   const x = c.touch ? c.width / 2 + 60 : c.safe.left + 10;
@@ -22,7 +22,7 @@ export function drawOnlineBadge(c: GameCanvas, info: OnlineBadgeInfo): void {
   const color = ms < 0 ? '#9aa6b8' : ms < 80 ? '#6bd36b' : ms < 200 ? '#ffd54a' : '#ff5a4d';
   const lines: string[] = [`${info.code} · ${ms >= 0 ? `${Math.round(ms)} ms` : '… ms'}`];
   if (info.syncedTurn > 0 && !c.touch) lines.push(t('online.synced', { n: info.syncedTurn }));
-  if (info.waitingFor) lines.push(t('online.waiting', { name: info.waitingFor }));
+  if (info.status) lines.push(info.status);
   ctx.save();
   ctx.font = `bold 12px ${FONT}`;
   ctx.textBaseline = 'middle';
@@ -35,7 +35,7 @@ export function drawOnlineBadge(c: GameCanvas, info: OnlineBadgeInfo): void {
   ctx.fillStyle = '#fff';
   lines.forEach((l, i) => {
     ctx.font = `${i === 0 ? 'bold ' : ''}12px ${FONT}`;
-    ctx.fillStyle = i === 2 || (i === 1 && info.waitingFor && lines.length === 2) ? '#ffd54a' : i === 0 ? '#fff' : 'rgba(255,255,255,0.7)';
+    ctx.fillStyle = info.status && i === lines.length - 1 && i > 0 ? '#ffd54a' : i === 0 ? '#fff' : 'rgba(255,255,255,0.7)';
     ctx.fillText(l, x + 26, y + 13 + i * 16);
   });
   ctx.restore();

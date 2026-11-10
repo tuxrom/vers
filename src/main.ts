@@ -18,9 +18,7 @@ import { NEUTRAL_INTENT, type Intent } from '@/core/intent';
 import { ActionInput, bindKeyboard } from '@/core/input';
 import { GameLoop } from '@/core/loop';
 import { isHotSeat, randomSeed, sanitizeOptions, seedToNumber, type GameOptions } from '@/core/options';
-import { NetClient, defaultServerUrl } from '@/net/client';
-import type { ServerMsg } from '@/net/protocol';
-import { OnlineSession } from '@/net/session';
+import { OnlineController } from '@/net/controller';
 import { drawOnlineBadge } from '@/ui/onlineBadge';
 import { PointerController } from '@/core/pointer';
 import { renderWorld } from '@/core/render';
@@ -32,7 +30,7 @@ import { Fx } from '@/ui/fx';
 import { drawGameOver } from '@/ui/gameover';
 import { drawHud } from '@/ui/hud';
 import { defaultTeamNames, setLang } from '@/ui/i18n';
-import { MenuManager, type MenuHost, type OnlineMenuHost, type RoomView } from '@/ui/menu/menu';
+import { MenuManager, type MenuHost } from '@/ui/menu/menu';
 import { Minimap } from '@/ui/minimap';
 import { UI } from '@/ui/ui';
 import { drawWeaponHud, drawWeaponMenu } from '@/ui/weaponMenu';
@@ -127,177 +125,44 @@ let touchTarget: { x: number; y: number } | null = null;
 /** Commandes tactiles de la frame courante (calculées une fois par frame, pas à chaque lecture). */
 let frameCircles: ReturnType<typeof computeControls> | null = null;
 
-// --- En ligne : connexion au serveur de salons, session lockstep -------------------------------------------
-let net: NetClient | null = null;
-let online: OnlineSession | null = null;
-let room: RoomView | null = null;
-let onlineError: string | null = null;
-let onlineBusy = false;
-/** Instant (ms) où la simulation a commencé à attendre un joueur distant ; 0 = elle n'attend pas. */
-let stalledSince = 0;
-let endSent = false;
-/** Empreinte de l'état au début de chaque tour (consultable en debug : comparer les appareils). */
-const turnHashes = new Map<number, string>();
-let configTimer = 0;
-let waiters: ((ok: boolean) => void)[] = [];
-
-/** L'équipe `team` est-elle jouée par un humain de CET appareil ? */
-const localTeam = (team: number): boolean => (online ? online.isLocalTeam(team) : state.teams[team]?.controller === 'human');
-/** Phase contrôlée (tour ou retraite) et équipe active jouée ici : les commandes du joueur s'appliquent. */
-const localCanAct = (): boolean => (state.phase === 'turn' || state.phase === 'firing') && localTeam(state.turn.team);
-/** L'IA de CET appareil pilote-t-elle le tour en cours ? (en ligne : seul l'hôte fait tourner les IA, les autres reçoivent ses actions) */
-const aiDrives = (): boolean => AiController.isAiTurn(state) && (!online || online.isHost);
-
+// --- En ligne : salons, lockstep et reconnexion sont dans `net/controller.ts` ; ici, seulement le câblage ---------
 function onlineName(): string {
   let n = persistence.onlineName();
   if (!n) { n = `Joueur${Math.floor(Math.random() * 900 + 100)}`; persistence.setOnlineName(n); }
   return n;
 }
 
-function settle(ok: boolean): void { const w = waiters; waiters = []; for (const f of w) f(ok); }
-
-async function ensureNet(): Promise<boolean> {
-  if (net?.status === 'open') return true;
-  onlineBusy = true; onlineError = null; menu.render();
-  const c = new NetClient();
-  c.onMessage = onNetMessage;
-  c.onClose = onNetClose;
-  try {
-    await c.connect(defaultServerUrl(), onlineName());
-    net = c;
-    return true;
-  } catch {
-    onlineError = t('online.failed');
-    return false;
-  } finally {
-    onlineBusy = false;
-  }
-}
-
-/** Attend la réponse du serveur (salon ouvert ou erreur) à une demande de création / jonction. */
-function awaitRoom(): Promise<boolean> {
-  return new Promise((resolve) => {
-    const timer = window.setTimeout(() => { settle(false); }, 6000);
-    waiters.push((ok) => { window.clearTimeout(timer); resolve(ok); });
-  });
-}
-
-async function onlineEnter(send: () => void): Promise<boolean> {
-  if (!(await ensureNet())) return false;
-  room = null; onlineError = null;
-  send();
-  const ok = await awaitRoom();
-  if (!ok && !onlineError) onlineError = t('online.failed');
-  return ok;
-}
-
-function leaveOnline(): void {
-  try { net?.send({ t: 'leave' }); } catch { /* connexion déjà fermée */ }
-  net?.close();
-  net = null; online = null; room = null; onlineError = null; stalledSince = 0; endSent = false;
-  if (mode === 'game') { mode = 'menu'; state = demo; killcam = null; recorder.reset(); }
-  menu.show('home', true);
-}
-
-function onNetClose(): void {
-  const inGame = mode === 'game' && online !== null && state.phase !== 'gameover';
-  net = null; online = null; room = null;
-  settle(false);
-  if (inGame) {
-    showFatal(t('online.lost'), () => { mode = 'menu'; state = demo; killcam = null; recorder.reset(); menu.show('home', true); });
-  } else {
-    onlineError = t('online.lost');
-    if (menu.visible && (menu.current === 'lobby' || menu.current === 'online')) menu.show('online', true);
-  }
-}
-
-function onNetMessage(m: ServerMsg): void {
-  switch (m.t) {
-    case 'room':
-      room = { code: m.code, hostId: m.hostId, you: net?.id ?? '', phase: m.phase, players: m.players, options: m.options };
-      settle(true);
-      if (menu.current === 'lobby') menu.render();
-      return;
-    case 'error': {
-      const key = `online.err.${m.code}`;
-      onlineError = ['not-found', 'full', 'in-progress', 'version', 'busy', 'not-host', 'slots', 'gap'].includes(m.code)
-        ? t(key as Parameters<typeof t>[0]) : t('online.err.other', { msg: m.message });
-      if (mode === 'game') toasts.show('neterr', { text: onlineError, timeoutMs: 5000 });
-      settle(false);
-      if (menu.current === 'online') menu.render();
-      return;
-    }
-    case 'start': startOnlineGame(m); return;
-    default: {
-      const r = online?.receive(m);
-      if (!r) return;
-      if (r.kind === 'replace') {
-        const tm = state.teams[r.team];
-        if (tm) { tm.controller = 'ai'; tm.difficulty = 'medium'; }
-        toasts.show('replaced', { text: t('online.replaced', { name: r.name || tm?.name || '' }), timeoutMs: 6000 });
-      } else if (r.kind === 'host') {
-        toasts.show('hostchg', { text: t('online.hostChanged'), timeoutMs: 5000 });
-      } else if (r.kind === 'desync') {
-        showFatal(t('online.desync', { turn: r.turn }), leaveOnline);
-      }
-    }
-  }
-}
-
-/** Début (ou revanche) d'une partie en ligne : graine et options imposées par le serveur → carte et état identiques partout. */
-function startOnlineGame(m: Extract<ServerMsg, { t: 'start' }>): void {
-  if (!net) return;
-  // La session reçoit immédiatement les actions des autres, même pendant la génération de la carte.
-  online = new OnlineSession(net.id, m.owners, m.hostId, room?.code ?? '');
-  endSent = false; stalledSince = 0; turnHashes.clear();
-  menu.hide();
-  menu.setLoading(true);
-  if (touchMode()) void enterFullscreen();
-  setTimeout(() => {
-    try {
-      state = createState({ options: m.options });
-      fx = new Fx();
-      fx.density = QUALITY[settings.quality].particles;
-      adaptive.reset(); canvas.resolutionScale = 1; canvas.resize();
-      mode = 'game'; recorded = false; handoffPending = false; killcam = null; killcamAutoDone = false;
-      camera.resume(); ui.menuOpen = false; input.clearPressed(); recorder.reset();
-      menu.setLoading(false);
-    } catch (e) {
-      console.error(e);
-      menu.setLoading(false);
-      showFatal(t('error.memory'), leaveOnline);
-    }
-  }, 40);
-}
-
-const onlineHost: OnlineMenuHost = {
+const online = new OnlineController({
+  state: () => state,
+  inGame: () => mode === 'game',
+  options: () => sanitizeOptions(host.options, defaultTeamNames()),
   name: onlineName,
   setName: (n) => persistence.setOnlineName(n),
-  room: () => room,
-  busy: () => onlineBusy,
-  error: () => onlineError,
-  clearError: () => { onlineError = null; },
-  create: () => onlineEnter(() => net?.send({ t: 'create', options: sanitizeOptions(host.options, defaultTeamNames()) })),
-  join: (code) => onlineEnter(() => net?.send({ t: 'join', code: code.trim().toUpperCase() })),
-  pushConfig() {
-    window.clearTimeout(configTimer);
-    configTimer = window.setTimeout(() => {
-      if (room && room.hostId === room.you) net?.send({ t: 'config', options: sanitizeOptions(host.options, defaultTeamNames()) });
-    }, 250);
-  },
-  start: () => net?.send({ t: 'start' }),
-  leave: leaveOnline,
+  menu: () => menu,
+  begin: (options) => beginGame(options, () => online.leave()),
+  backToDemo: () => { mode = 'menu'; state = demo; killcam = null; recorder.reset(); },
+  toast: (id, text, timeoutMs) => toasts.show(id, { text, timeoutMs }),
+  fatal: (message, then) => showFatal(message, then),
   shareLink: (code) => `${location.origin}/?room=${code}`,
-};
+  now: () => performance.now(),
+});
+online.keepHashes = debug.enabled;
+
+/** L'équipe `team` est-elle jouée par un humain de CET appareil ? */
+const localTeam = (team: number): boolean => (online.session ? online.session.isLocalTeam(team) : state.teams[team]?.controller === 'human');
+/** Phase contrôlée (tour ou retraite) et équipe active jouée ici : les commandes du joueur s'appliquent. */
+const localCanAct = (): boolean => (state.phase === 'turn' || state.phase === 'firing') && localTeam(state.turn.team);
+/** L'IA de CET appareil pilote-t-elle le tour en cours ? (en ligne : seul l'hôte fait tourner les IA, les autres reçoivent ses actions) */
+const aiDrives = (): boolean => AiController.isAiTurn(state) && (!online.active || online.isHost);
 
 const host: MenuHost = {
-  online: onlineHost,
+  online: online.menuHost,
   persistence,
   settings,
   options: persistence.loadOptions(defaultTeamNames()),
   onStart: startGame,
   onResume() { input.clearPressed(); },
-  onQuit: () => (online ? leaveOnline() : quitToMenu()),
+  onQuit: () => (online.active ? online.leave() : quitToMenu()),
   onSettingsChanged: applySettings,
   installKind: () => install.kind,
   onInstall: () => { void install.prompt(); },
@@ -306,7 +171,7 @@ const host: MenuHost = {
   fullscreenAvailable: () => canFullscreen(),
   fullscreenActive: () => isFullscreen(),
   onToggleFullscreen: () => { void toggleFullscreen(); },
-  canReplay: () => mode === 'game' && recorder.hasShot() && (!online || state.phase === 'gameover'),
+  canReplay: () => mode === 'game' && recorder.hasShot() && (!online.active || state.phase === 'gameover'),
   onReplay: startKillcam,
 };
 const menu = new MenuManager(document.getElementById('ui') as HTMLElement, host);
@@ -333,10 +198,8 @@ const touchHost: TouchHost = {
 // Créé AVANT le contrôleur de pointeur : il retire de la caméra les doigts attribués aux commandes.
 const touchCtl = new TouchControls(canvas.el, touchHost);
 
-/** Nouvelle partie avec ces options (sauvegardées comme « dernières options »). */
-function startGame(options: GameOptions): void {
-  host.options = structuredClone(options);
-  persistence.saveOptions(host.options);
+/** Crée la partie (carte, état, remise à zéro de l'affichage) ; `onFail` après le message si la création échoue. */
+function beginGame(options: GameOptions, onFail: () => void): void {
   menu.hide();
   menu.setLoading(true);
   // Sur mobile : plein écran + verrouillage paysage (depuis ce geste ; sans effet si non supporté → écran de rotation).
@@ -344,29 +207,36 @@ function startGame(options: GameOptions): void {
   // Laisse le navigateur afficher « Génération… » avant le calcul (≈ 0,3 s, bloquant).
   setTimeout(() => {
     try {
-    state = createState({ options });
-    fx = new Fx();
-    fx.density = QUALITY[settings.quality].particles;
-    adaptive.reset();
-    canvas.resolutionScale = 1;
-    canvas.resize();
-    mode = 'game';
-    recorded = false;
-    handoffPending = false;
-    camera.resume();
-    ui.menuOpen = false;
-    input.clearPressed();
-    recorder.reset();
-    killcam = null;
-    killcamAutoDone = false;
-    menu.setLoading(false);
+      state = createState({ options });
+      fx = new Fx();
+      fx.density = QUALITY[settings.quality].particles;
+      adaptive.reset();
+      canvas.resolutionScale = 1;
+      canvas.resize();
+      mode = 'game';
+      recorded = false;
+      handoffPending = false;
+      camera.resume();
+      ui.menuOpen = false;
+      input.clearPressed();
+      recorder.reset();
+      killcam = null;
+      killcamAutoDone = false;
+      menu.setLoading(false);
     } catch (e) {
       // Mémoire insuffisante, canvas indisponible… : message clair et retour au menu plutôt qu'un écran figé.
       console.error(e);
       menu.setLoading(false);
-      showFatal(t(e instanceof CanvasUnavailableError ? 'error.canvas' : 'error.memory'), quitToMenu);
+      showFatal(t(e instanceof CanvasUnavailableError ? 'error.canvas' : 'error.memory'), onFail);
     }
   }, 40);
+}
+
+/** Nouvelle partie locale avec ces options (sauvegardées comme « dernières options »). */
+function startGame(options: GameOptions): void {
+  host.options = structuredClone(options);
+  persistence.saveOptions(host.options);
+  beginGame(options, quitToMenu);
 }
 
 /** Rejouer : mêmes options, carte suivante (graine dérivée, déterministe). */
@@ -441,7 +311,7 @@ canvas.onContextRestored = () => {
 
 /** Pause automatique : onglet masqué ou fenêtre qui perd le focus (jamais de partie qui se joue sans le joueur). */
 function autoPause(): void {
-  if (online || mode !== 'game' || menu.visible || handoffPending || killcam || state.phase === 'gameover') return;
+  if (online.active || mode !== 'game' || menu.visible || handoffPending || killcam || state.phase === 'gameover') return;
   menu.show('pause', true);
   toasts.show('autopause', { text: t('pause.auto'), timeoutMs: 3500 });
 }
@@ -469,10 +339,10 @@ new PointerController(canvas.el, camera, {
       if (r.id === 'menu-bg' || r.id === 'menu-close') ui.menuOpen = false;
       else if (r.id === 'pause-btn') menu.show('pause', true);
       else if (r.id === 'weapon-btn') ui.menuOpen = true;
-      else if (r.id === 'replay') { if (online) net?.send({ t: 'rematch' }); else restart(); }
+      else if (r.id === 'replay') { if (online.active) online.rematch(); else restart(); }
       else if (r.id === 'replay-shot') startKillcam();
       else if (r.id === 'killcam-skip') endKillcam();
-      else if (r.id === 'gameover-menu') { if (online) leaveOnline(); else quitToMenu(); }
+      else if (r.id === 'gameover-menu') { if (online.active) online.leave(); else quitToMenu(); }
       else if (r.id.startsWith('weapon:')) { input.pushSelect(r.id.slice(7)); ui.menuOpen = false; }
       else if (r.id.startsWith('fuse:')) input.pushFuse(Number(r.id.slice(5)));
     }
@@ -481,7 +351,7 @@ new PointerController(canvas.el, camera, {
     if (mode !== 'game') return;
     const p = camera.screenToWorld(sx, sy, canvas.width, canvas.height);
     // Debug : Maj+clic creuse un cratère (commande rejouable passée par la simulation).
-    if (e.shift && !online) input.pushCrater({ x: p.x, y: p.y, r: GAMEPLAY.explosion.presets.medium.radius });
+    if (e.shift && !online.active) input.pushCrater({ x: p.x, y: p.y, r: GAMEPLAY.explosion.presets.medium.radius });
     else if (touchMode()) {
       // Au doigt : un appui pose une cible provisoire, validée ensuite par le bouton ✓ (pas de tir sur un appui raté).
       if (controlsActive() && WEAPONS[state.turn.weapon].input === 'target') touchTarget = p;
@@ -495,7 +365,7 @@ new PointerController(canvas.el, camera, {
 // Expose l'état pour les tests navigateur (dev / ?debug uniquement).
 if (debug.enabled) {
   (window as unknown as { __game: unknown }).__game = {
-    get state() { return state; }, get mode() { return mode; }, syncHash: () => syncHash(state), get online() { return online; }, turnHashes, get net() { return net; }, get room() { return room; }, perf, recorder, get killcam() { return killcam; }, startKillcam, endKillcam, version: __APP_VERSION__, install, toasts, get sw() { return sw; }, ai, camera, touchCtl, touchCircles: () => touchHost.circles(), get touchTarget() { return touchTarget; }, input, canvas, minimap, ui, audio, menu, persistence,
+    get state() { return state; }, get mode() { return mode; }, syncHash: () => syncHash(state), get online() { return online.session; }, turnHashes: online.turnHashes, get net() { return online.net; }, get room() { return online.room; }, onlineCtl: online, perf, recorder, get killcam() { return killcam; }, startKillcam, endKillcam, version: __APP_VERSION__, install, toasts, get sw() { return sw; }, ai, camera, touchCtl, touchCircles: () => touchHost.circles(), get touchTarget() { return touchTarget; }, input, canvas, minimap, ui, audio, menu, persistence,
     get fx() { return fx; },
   };
 }
@@ -514,31 +384,21 @@ function humanIntent(): Intent {
   return intent;
 }
 
-/**
- * Pas de simulation en ligne (lockstep). L'intention vient du propriétaire de l'équipe active : lue ici si c'est cet
- * appareil, produite par l'IA si c'est l'hôte qui la pilote, sinon reçue du réseau (le pas attend : `false`).
- * Les entrées locales sont neutralisées quand un menu est ouvert.
- */
-function onlineStep(): boolean {
-  const ses = online as OnlineSession;
-  const s = state;
-  const before = s.turnNumber;
-  const intent = ses.intentFor(s, () => {
-    if (aiDrives()) { input.clearPressed(); return ai.nextIntent(s); }
-    if (menu.visible) { input.clearPressed(); return NEUTRAL_INTENT; }
-    const it = humanIntent();
-    return it.craters.length ? { ...it, craters: [] } : it; // pas de cratères de debug en ligne
-  });
-  if (intent === null) { if (!stalledSince) stalledSince = performance.now(); return false; }
-  stalledSince = 0;
+/** Exécute un pas de simulation avec cette intention (mesure, enregistrement du tour pour le replay). */
+function runStep(intent: Intent): void {
   const t0 = performance.now();
-  step(s, SIM_DT, intent);
+  step(state, SIM_DT, intent);
   perf.addUpdate(performance.now() - t0);
-  recorder.afterStep(s, intent);
+  recorder.afterStep(state, intent);
   debug.onStep();
-  if (s.turnNumber !== before) { ses.turnStarted(s); if (debug.enabled) turnHashes.set(s.turnNumber, syncHash(s)); } // empreinte de l'état au début du tour → relève de tour confirmée par le serveur
-  if (s.phase === 'gameover' && !endSent) { endSent = true; ses.gameEnded(s); }
-  return true;
+}
+
+/** Intention produite par CET appareil pour un pas en ligne : IA (hôte), neutre si un menu est ouvert, sinon le joueur. */
+function onlineLocalIntent(): Intent {
+  if (aiDrives()) { input.clearPressed(); return ai.nextIntent(state); }
+  if (menu.visible) { input.clearPressed(); return NEUTRAL_INTENT; }
+  const it = humanIntent();
+  return it.craters.length ? { ...it, craters: [] } : it; // pas de cratères de debug en ligne
 }
 
 const loop = new GameLoop({
@@ -553,21 +413,17 @@ const loop = new GameLoop({
       return;
     }
     // Hors ligne : pause / transition hot-seat / replay gèlent la simulation. En ligne, les menus ne la gèlent pas (les autres joueurs continuent).
-    if ((menu.visible && !online) || handoffPending || killcam) return;
-    if (online) return onlineStep();
+    if ((menu.visible && !online.active) || handoffPending || killcam) return;
+    if (online.active) return online.step(state, onlineLocalIntent, runStep);
     // Tour d'une équipe IA : ses intentions remplacent celles du clavier (qui sont écartées).
     const aiTurn = AiController.isAiTurn(state);
     if (aiTurn) input.clearPressed();
     const intent = aiTurn ? ai.nextIntent(state) : humanIntent();
-    const t0 = performance.now();
-    step(state, dt, intent);
-    perf.addUpdate(performance.now() - t0);
-    recorder.afterStep(state, intent);
-    debug.onStep();
+    runStep(intent);
   },
   /** En ligne : rattrape le retard (intentions déjà reçues mais pas encore jouées) plus vite que le temps réel. */
   boost() {
-    return online && mode === 'game' && online.backlog(state.tick) > 4 ? SIM_DT * 2 : 0;
+    return mode === 'game' && online.backlog(state.tick) > 4 ? SIM_DT * 2 : 0;
   },
   render(alpha, frameMs) {
     perf.beginRender(performance.now());
@@ -582,7 +438,7 @@ const loop = new GameLoop({
 
     if (input.consume('debug')) debug.toggle();
     if (input.consume('mute')) audio.toggleMute();
-    if (input.consume('restart') && mode === 'game' && state.phase === 'gameover') { if (online) { if (online.isHost) net?.send({ t: 'rematch' }); } else restart(); }
+    if (input.consume('restart') && mode === 'game' && state.phase === 'gameover') { if (online.active) online.rematch(); else restart(); }
     // Tour d'une IA ou d'un autre joueur (en ligne) : ni menu d'armes ni commandes pour ce joueur.
     const notMyTurn = mode === 'game' && (state.phase === 'turn' || state.phase === 'firing') && !localCanAct();
     if (input.consume('weapons') && !notMyTurn) ui.menuOpen = !ui.menuOpen;
@@ -621,7 +477,7 @@ const loop = new GameLoop({
     // Événements de la simulation → caméra, effets, sons, transition hot-seat.
     let handoff: { team: number; worm: number } | null = null;
     for (const e of state.events) {
-      if (e.t === 'turn' && mode === 'game' && !online && isHotSeat(state.options) && state.teams[e.team]?.controller === 'human') handoff = e;
+      if (e.t === 'turn' && mode === 'game' && !online.active && isHotSeat(state.options) && state.teams[e.team]?.controller === 'human') handoff = e;
     }
     haptics.enabled = settings.haptics && touch && mode === 'game';
     haptics.onEvents(state.events, state);
@@ -658,9 +514,9 @@ const loop = new GameLoop({
     }
     // Réflexion de l'IA : calcul découpé en tranches de quelques ms par frame (pas de gel de l'interface).
     // Réflexion de l'IA : en ligne, seul l'hôte la fait tourner (les autres reçoivent ses actions).
-    if (mode === 'game' && (!menu.visible || online) && !handoffPending && (!online || online.isHost)) ai.pump(state);
+    if (mode === 'game' && (!menu.visible || online.active) && !handoffPending && (!online.active || online.isHost)) ai.pump(state);
     // En ligne : envoi des intentions locales et annonces de tour accumulées pendant la frame.
-    if (online && net) for (const m of online.drain()) net.send(m);
+    online.flush();
     if (!(mode === 'game' && (menu.visible || handoffPending))) {
       fx.update(dtSec, state);
       for (const p of state.projectiles) if (p.kind === 'rocket') fx.trail(p.x, p.y, dtSec / Math.max(1, state.projectiles.length));
@@ -679,9 +535,8 @@ const loop = new GameLoop({
     if (mode === 'game') {
       drawHud(canvas, state, ai.thinking, ui);
       drawWeaponHud(canvas, ui, state, localCanAct());
-      if (online && net) {
-        const waiting = stalledSince && performance.now() - stalledSince > 350 ? (state.teams[state.turn.team]?.name ?? '') : null;
-        drawOnlineBadge(canvas, { rtt: net.rtt, code: online.code, syncedTurn: online.confirmedTurn, waitingFor: waiting });
+      if (online.session) {
+        drawOnlineBadge(canvas, { rtt: online.net?.rtt ?? -1, code: online.session.code, syncedTurn: online.session.confirmedTurn, status: online.status(state) });
       }
       minimap.draw(canvas, ui, state, camera, performance.now());
       if (touch && !menu.visible) {
@@ -690,7 +545,7 @@ const loop = new GameLoop({
       }
       drawWeaponMenu(canvas, ui, state);
       fx.drawBanner(canvas.ctx, canvas.width, canvas.height);
-      if (!menu.visible) drawGameOver(canvas, ui, state, recorder.hasShot(), online ? (online.isHost ? 'host' : 'guest') : null);
+      if (!menu.visible) drawGameOver(canvas, ui, state, recorder.hasShot(), online.active ? (online.isHost ? 'host' : 'guest') : null);
       if (debug.enabled) drawDebugOverlay(canvas, debug, state, perf);
     }
     debug.onFrame(frameMs);
@@ -707,7 +562,7 @@ loop.start();
 if (params.has('room')) {
   // Lien d'invitation : on rejoint directement le salon (le pseudo est celui déjà enregistré).
   menu.show('online', true);
-  void onlineHost.join(params.get('room') ?? '').then((ok) => { if (ok) menu.show('lobby', true); else menu.render(); });
+  void online.menuHost.join(params.get('room') ?? '').then((ok) => { if (ok) menu.show('lobby', true); else menu.render(); });
 } else if (params.has('seed') || params.has('play')) {
   const o = structuredClone(host.options);
   if (params.has('seed')) o.seed = params.get('seed') ?? o.seed;
